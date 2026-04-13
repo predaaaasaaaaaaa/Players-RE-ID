@@ -40,7 +40,7 @@ class Detector:
         detections = []
         for box in results.boxes:
             cls_id = int(box.cls[0])
-            if cls_id != config.PLAYER_CLASS_ID:
+            if cls_id not in (config.PLAYER_CLASS_ID, config.GOALKEEPER_CLASS_ID):
                 continue
 
             xyxy = box.xyxy[0].cpu().numpy().astype(int)

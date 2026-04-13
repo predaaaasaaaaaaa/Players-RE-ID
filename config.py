@@ -13,8 +13,10 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 # ── Detection ──────────────────────────────────────────
 DETECTION_CONF = 0.3          # confidence threshold
 DETECTION_IOU = 0.5           # NMS IoU threshold
-PLAYER_CLASS_ID = 0           # class index for 'player' (verify after first run)
-BALL_CLASS_ID = 1             # class index for 'ball' (verify after first run)
+PLAYER_CLASS_ID = 2           # 'player' (confirmed from model)
+BALL_CLASS_ID = 0             # 'ball' (confirmed from model)
+GOALKEEPER_CLASS_ID = 1       # 'goalkeeper'
+REFEREE_CLASS_ID = 3          # 'referee'
 
 # ── Tracking ───────────────────────────────────────────
 TRACK_HIGH_THRESH = 0.5       # ByteTrack high detection threshold
