@@ -120,3 +120,15 @@ if __name__ == "__main__":
     for tid in sorted(track_spans):
         start, end = track_spans[tid]
         print(f"  Track {tid}: frames {start}-{end} ({end - start + 1} frames)")
+
+    # Save summary to output
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = config.OUTPUT_DIR / "step2_tracking_summary.txt"
+    with open(out_path, "w") as f:
+        f.write(f"Total frames: {len(frames)}\n")
+        f.write(f"Unique track IDs: {len(all_ids)}\n")
+        f.write(f"Track IDs: {sorted(all_ids)}\n\n")
+        for tid in sorted(track_spans):
+            start, end = track_spans[tid]
+            f.write(f"Track {tid}: frames {start}-{end} ({end - start + 1} frames)\n")
+    print(f"[Saved] {out_path}")
