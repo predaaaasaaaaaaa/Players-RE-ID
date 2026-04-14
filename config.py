@@ -11,7 +11,7 @@ VIDEO_PATH = PROJECT_ROOT / "data" / "15sec_input_720p.mp4"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 
 # ── Detection ──────────────────────────────────────────
-DETECTION_CONF = 0.3          # confidence threshold
+DETECTION_CONF = 0.5          # confidence threshold
 DETECTION_IOU = 0.5           # NMS IoU threshold
 PLAYER_CLASS_ID = 2           # 'player' (confirmed from model)
 BALL_CLASS_ID = 0             # 'ball' (confirmed from model)

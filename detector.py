@@ -50,6 +50,12 @@ class Detector:
             x2, y2 = min(w, x2), min(h, y2)
 
             crop = frame[y1:y2, x1:x2].copy()
+            
+            # Filter out tiny partial detections (ghost players)
+            box_area = (x2 - x1) * (y2 - y1)
+            if box_area < 1000:
+                continue
+ 
             if crop.size == 0:
                 continue
 
