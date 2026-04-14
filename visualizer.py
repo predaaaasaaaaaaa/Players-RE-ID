@@ -51,8 +51,14 @@ def run_visualizer():
     tracker = Tracker()
     frames = tracker.track_video()
 
-    # 2. Re-ID
+    # 2. Re-ID (fit teams on first 5 frames)
     matcher = ReIDMatcher()
+    init_crops = []
+    for fr in frames[:5]:
+        for p in fr.players:
+            init_crops.append(p.crop)
+    matcher.fit_teams(init_crops)
+
     all_mappings = []
     for fr in frames:
         mapping = matcher.process_frame(fr.players, fr.frame_idx)

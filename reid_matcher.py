@@ -3,9 +3,13 @@ Player re-identification via appearance matching.
 Maintains a gallery of player feature embeddings and resolves
 new ByteTrack IDs against lost tracks using cosine similarity.
 
+Now includes team classification as a hard constraint:
+  - Players are classified into teams via KMeans on jersey color
+  - Re-ID matching NEVER crosses team boundaries
+
 Flow per frame:
   1. Known track IDs → update gallery with EMA
-  2. New track IDs → compare against lost tracks' gallery
+  2. New track IDs → compare against lost tracks' gallery (same team only)
      - Match found → remap to old consistent ID
      - No match    → assign fresh consistent ID
   3. Missing IDs   → mark as lost (available for future matching)
@@ -15,6 +19,7 @@ from scipy.spatial.distance import cosine
 
 import config
 from feature_extractor import FeatureExtractor
+from team_classifier import TeamClassifier
 
 
 class ReIDMatcher:
@@ -22,7 +27,9 @@ class ReIDMatcher:
 
     def __init__(self):
         self.extractor = FeatureExtractor()
+        self.team_classifier = TeamClassifier()
         self.gallery = {}          # {consistent_id: feature_vector}
+        self.team_labels = {}      # {consistent_id: team_label (0 or 1)}
         self.id_map = {}           # {bytetrack_id: consistent_id}
         self.active_ids = set()    # consistent IDs seen in current frame
         self.lost_ids = set()      # consistent IDs not seen recently
@@ -30,12 +37,16 @@ class ReIDMatcher:
         self.lost_frame_count = {} # {consistent_id: frames_since_lost}
         self.max_lost_frames = 150 # remove from lost pool after this many frames
 
+    def fit_teams(self, all_crops: list[np.ndarray]):
+        """Fit team classifier on a batch of crops (from first N frames)."""
+        self.team_classifier.fit(all_crops)
+
     def _cosine_sim(self, a: np.ndarray, b: np.ndarray) -> float:
         """Cosine similarity between two feature vectors."""
         return 1.0 - cosine(a, b)
 
-    def _find_best_match(self, feat: np.ndarray) -> tuple[int | None, float]:
-        """Compare feature against all lost gallery entries.
+    def _find_best_match(self, feat: np.ndarray, team: int) -> tuple[int | None, float]:
+        """Compare feature against lost gallery entries of the SAME team.
         Returns (matched_consistent_id, similarity) or (None, 0.0).
         """
         best_id = None
@@ -44,6 +55,11 @@ class ReIDMatcher:
         for cid in self.lost_ids:
             if cid not in self.gallery:
                 continue
+            # Hard constraint: skip if different team
+            if team != -1 and self.team_labels.get(cid, -1) != -1:
+                if self.team_labels[cid] != team:
+                    continue
+
             sim = self._cosine_sim(feat, self.gallery[cid])
             if sim > best_sim:
                 best_sim = sim
@@ -81,12 +97,16 @@ class ReIDMatcher:
         for player in players:
             bt_id = player.track_id
             current_bt_ids.add(bt_id)
+            team = self.team_classifier.predict(player.crop)
 
             if bt_id in self.id_map:
                 # Known track → update gallery
                 cid = self.id_map[bt_id]
                 feat = self.extractor.extract(player.crop)["combined"]
                 self._update_gallery(cid, feat)
+                # Update team label
+                if team != -1:
+                    self.team_labels[cid] = team
                 frame_mapping[bt_id] = cid
 
                 # If this was lost, recover it
@@ -95,9 +115,9 @@ class ReIDMatcher:
                     if cid in self.lost_frame_count:
                         del self.lost_frame_count[cid]
             else:
-                # New ByteTrack ID → try to match against lost
+                # New ByteTrack ID → try to match against lost (same team only)
                 feat = self.extractor.extract(player.crop)["combined"]
-                match_id, sim = self._find_best_match(feat)
+                match_id, sim = self._find_best_match(feat, team)
 
                 if match_id is not None:
                     # Re-identified! Map new BT ID to old consistent ID
@@ -113,6 +133,8 @@ class ReIDMatcher:
                     self.next_id += 1
                     self.id_map[bt_id] = cid
                     self.gallery[cid] = feat.copy()
+                    if team != -1:
+                        self.team_labels[cid] = team
                     frame_mapping[bt_id] = cid
 
         # Update lost tracks
@@ -147,6 +169,14 @@ if __name__ == "__main__":
     print("[Test] Running tracker...")
     frames = tracker.track_video()
 
+    # Fit teams on first 5 frames worth of crops
+    print("[Test] Fitting team classifier on first 5 frames...")
+    init_crops = []
+    for fr in frames[:5]:
+        for p in fr.players:
+            init_crops.append(p.crop)
+    matcher.fit_teams(init_crops)
+
     print("[Test] Running re-ID matching...")
     all_mappings = []
     for fr in frames:
@@ -165,15 +195,23 @@ if __name__ == "__main__":
         all_consistent.update(m.values())
 
     print(f"\n=== Re-ID Summary ===")
-    print(f"ByteTrack IDs: 96")
     print(f"Consistent IDs after re-ID: {len(all_consistent)}")
     print(f"Consistent IDs: {sorted(all_consistent)}")
 
+    # Team distribution
+    t0 = [cid for cid in all_consistent if matcher.team_labels.get(cid) == 0]
+    t1 = [cid for cid in all_consistent if matcher.team_labels.get(cid) == 1]
+    tn = [cid for cid in all_consistent if matcher.team_labels.get(cid, -1) == -1]
+    print(f"Team 0: {len(t0)} players {sorted(t0)}")
+    print(f"Team 1: {len(t1)} players {sorted(t1)}")
+    print(f"Unclassified: {len(tn)} players {sorted(tn)}")
+
     # Save summary
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = config.OUTPUT_DIR / "step4_reid_summary.txt"
+    out_path = config.OUTPUT_DIR / "step6_reid_with_teams.txt"
     with open(out_path, "w") as f:
-        f.write(f"ByteTrack IDs: 96\n")
         f.write(f"Consistent IDs after re-ID: {len(all_consistent)}\n")
-        f.write(f"Consistent IDs: {sorted(all_consistent)}\n")
+        f.write(f"Team 0: {len(t0)} players {sorted(t0)}\n")
+        f.write(f"Team 1: {len(t1)} players {sorted(t1)}\n")
+        f.write(f"Unclassified: {len(tn)} players {sorted(tn)}\n")
     print(f"[Saved] {out_path}")
