@@ -19,9 +19,9 @@ GOALKEEPER_CLASS_ID = 1       # 'goalkeeper'
 REFEREE_CLASS_ID = 3          # 'referee'
 
 # ── Tracking ───────────────────────────────────────────
-TRACK_HIGH_THRESH = 0.5       # ByteTrack high detection threshold
-TRACK_LOW_THRESH = 0.1        # ByteTrack low detection threshold
-TRACK_BUFFER = 30             # frames to keep lost tracks alive
+TRACK_HIGH_THRESH = 0.3       # lower = keep more detections in first pass
+TRACK_LOW_THRESH = 0.05       # lower = rescue more low-conf detections
+TRACK_BUFFER = 90             # 3x longer buffer to hold lost tracks (was 30)
 
 # ── Re-ID ──────────────────────────────────────────────
 REID_SIMILARITY_THRESH = 0.6  # cosine similarity threshold for re-id match
