@@ -42,7 +42,7 @@ class Tracker:
         path = video_path or str(config.VIDEO_PATH)
         results = self.model.track(
             source=path,
-            tracker="bytetrack_custom.yaml",
+            tracker="botsort_custom.yaml",
             conf=config.DETECTION_CONF,
             iou=config.DETECTION_IOU,
             persist=True,
