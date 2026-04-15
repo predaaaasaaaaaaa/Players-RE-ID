@@ -3,17 +3,20 @@ Player re-identification via appearance matching.
 Maintains a gallery of player feature embeddings and resolves
 new ByteTrack IDs against lost tracks using cosine similarity.
 
-Includes three layers of gallery protection (Confident Track Storage):
+Includes four layers of gallery protection (Confident Track Storage):
   1. Team constraint     — never match across teams
   2. Occlusion detection — skip gallery update when player overlaps another
   3. Crop quality gate   — only update gallery with high-conf, clean crops
   4. Gallery freeze      — freeze embeddings when players are too close
+  5. Dirty/clean loss    — collision-lost IDs need higher similarity to re-match
 
 Flow per frame:
   1. Detect occlusions + proximity between all players in frame
   2. Known track IDs → update gallery ONLY if crop is clean (not occluded)
   3. New track IDs → compare against lost tracks' gallery (same team only)
-  4. Missing IDs → mark as lost
+     - Clean-lost IDs (camera pan) → normal threshold
+     - Dirty-lost IDs (collision)  → higher threshold to prevent stolen IDs
+  4. Missing IDs → mark as lost, tag HOW they were lost
 """
 import numpy as np
 from scipy.spatial.distance import cosine
@@ -49,11 +52,13 @@ class ReIDMatcher:
     """Manages player identity with confident track storage."""
 
     # Quality thresholds
-    MIN_CONF_FOR_GALLERY = 0.65    # only update gallery if detection conf > this
-    MAX_IOU_FOR_GALLERY = 0.15     # skip update if overlapping another player > this
-    MIN_PROXIMITY = 60             # freeze gallery if two players within this px distance
-    MIN_CROP_HEIGHT = 40           # skip tiny crops
-    MIN_ASPECT_RATIO = 1.0        # height/width > this for valid standing player
+    MIN_CONF_FOR_GALLERY = 0.65
+    MAX_IOU_FOR_GALLERY = 0.15
+    MIN_PROXIMITY = 60
+    MIN_CROP_HEIGHT = 40
+    MIN_ASPECT_RATIO = 1.0
+    DIRTY_LOSS_PENALTY = 0.15      # extra similarity needed for collision-lost IDs
+    EDGE_MARGIN = 80               # pixels from frame edge to count as camera-pan loss
 
     def __init__(self):
         self.extractor = FeatureExtractor()
@@ -65,7 +70,9 @@ class ReIDMatcher:
         self.lost_ids = set()      # consistent IDs not seen recently
         self.next_id = 1           # counter for new consistent IDs
         self.lost_frame_count = {} # {consistent_id: frames_since_lost}
-        self.max_lost_frames = 150 # remove from lost pool after this many frames
+        self.max_lost_frames = 150
+        self.lost_dirty = {}       # {consistent_id: True if lost during collision}
+        self.last_bbox = {}        # {consistent_id: last known [x1,y1,x2,y2]}
 
     def fit_teams(self, all_crops: list[np.ndarray]):
         """Fit team classifier on a batch of crops (from first N frames)."""
@@ -75,24 +82,41 @@ class ReIDMatcher:
         """Cosine similarity between two feature vectors."""
         return 1.0 - cosine(a, b)
 
+    def _was_near_edge(self, cid) -> bool:
+        """Was player near frame edge when lost? (camera pan = clean loss)."""
+        if cid not in self.last_bbox:
+            return False
+        bbox = self.last_bbox[cid]
+        # Near left or right edge → camera pan
+        return bbox[0] < self.EDGE_MARGIN or bbox[2] > 1280 - self.EDGE_MARGIN
+
     def _find_best_match(self, feat: np.ndarray, team: int) -> tuple[int | None, float]:
-        """Compare feature against lost gallery entries of the SAME team."""
+        """Compare feature against lost gallery entries of the SAME team.
+        Dirty-lost IDs (collision) need higher similarity to match.
+        """
         best_id = None
         best_sim = 0.0
 
         for cid in self.lost_ids:
             if cid not in self.gallery:
                 continue
+            # Hard constraint: skip if different team
             if team != -1 and self.team_labels.get(cid, -1) != -1:
                 if self.team_labels[cid] != team:
                     continue
 
+            # Dirty-lost = collision, need higher bar to prevent stolen IDs
+            if self.lost_dirty.get(cid, False):
+                thresh = config.REID_SIMILARITY_THRESH + self.DIRTY_LOSS_PENALTY
+            else:
+                thresh = config.REID_SIMILARITY_THRESH
+
             sim = self._cosine_sim(feat, self.gallery[cid])
-            if sim > best_sim:
+            if sim > best_sim and sim >= thresh:
                 best_sim = sim
                 best_id = cid
 
-        if best_sim >= config.REID_SIMILARITY_THRESH:
+        if best_id is not None:
             return best_id, best_sim
         return None, best_sim
 
@@ -108,26 +132,18 @@ class ReIDMatcher:
             self.gallery[cid] = feat.copy()
 
     def _is_crop_clean(self, player, all_players) -> bool:
-        """Check if this player's crop is clean enough to update gallery.
-        Returns False if occluded, too close to another, bad aspect ratio, or low conf.
-        """
+        """Check if this player's crop is clean enough to update gallery."""
         bbox = player.bbox
         h = bbox[3] - bbox[1]
         w = bbox[2] - bbox[0]
 
-        # Check 1: minimum crop size
         if h < self.MIN_CROP_HEIGHT:
             return False
-
-        # Check 2: aspect ratio (standing player should be taller than wide)
         if w > 0 and (h / w) < self.MIN_ASPECT_RATIO:
             return False
-
-        # Check 3: detection confidence
         if player.conf < self.MIN_CONF_FOR_GALLERY:
             return False
 
-        # Check 4: overlap with any other player
         for other in all_players:
             if other.track_id == player.track_id:
                 continue
@@ -135,7 +151,6 @@ class ReIDMatcher:
             if iou > self.MAX_IOU_FOR_GALLERY:
                 return False
 
-        # Check 5: proximity to any other player
         for other in all_players:
             if other.track_id == player.track_id:
                 continue
@@ -174,10 +189,15 @@ class ReIDMatcher:
                     self.team_labels[cid] = team
                 frame_mapping[bt_id] = cid
 
+                # Always update last known position
+                self.last_bbox[cid] = player.bbox.copy()
+
                 if cid in self.lost_ids:
                     self.lost_ids.discard(cid)
                     if cid in self.lost_frame_count:
                         del self.lost_frame_count[cid]
+                    if cid in self.lost_dirty:
+                        del self.lost_dirty[cid]
             else:
                 # New ByteTrack ID → try to match against lost (same team only)
                 feat = self.extractor.extract(player.crop)["combined"]
@@ -185,28 +205,27 @@ class ReIDMatcher:
 
                 if match_id is not None:
                     self.id_map[bt_id] = match_id
-                    # Only update gallery on re-match if clean
                     if is_clean:
                         self._update_gallery(match_id, feat)
                     self.lost_ids.discard(match_id)
                     if match_id in self.lost_frame_count:
                         del self.lost_frame_count[match_id]
+                    if match_id in self.lost_dirty:
+                        del self.lost_dirty[match_id]
+                    self.last_bbox[match_id] = player.bbox.copy()
                     frame_mapping[bt_id] = match_id
                 else:
-                    # Genuinely new player — only add to gallery if clean
+                    # Genuinely new player
                     cid = self.next_id
                     self.next_id += 1
                     self.id_map[bt_id] = cid
-                    if is_clean:
-                        self.gallery[cid] = feat.copy()
-                    else:
-                        # Store anyway but mark as low quality
-                        self.gallery[cid] = feat.copy()
+                    self.gallery[cid] = feat.copy()
                     if team != -1:
                         self.team_labels[cid] = team
+                    self.last_bbox[cid] = player.bbox.copy()
                     frame_mapping[bt_id] = cid
 
-        # Update lost tracks
+        # Update lost tracks — tag HOW they were lost
         prev_active = self.active_ids.copy()
         self.active_ids = {self.id_map[bt] for bt in current_bt_ids if bt in self.id_map}
 
@@ -214,6 +233,8 @@ class ReIDMatcher:
         for cid in newly_lost:
             self.lost_ids.add(cid)
             self.lost_frame_count[cid] = 0
+            # Tag: near edge = clean loss (camera pan), otherwise = dirty (collision)
+            self.lost_dirty[cid] = not self._was_near_edge(cid)
 
         stale = []
         for cid in self.lost_ids:
@@ -223,6 +244,8 @@ class ReIDMatcher:
         for cid in stale:
             self.lost_ids.discard(cid)
             del self.lost_frame_count[cid]
+            if cid in self.lost_dirty:
+                del self.lost_dirty[cid]
 
         return frame_mapping
 
