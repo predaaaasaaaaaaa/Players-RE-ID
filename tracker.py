@@ -1,10 +1,13 @@
 """
-Frame-to-frame player tracking using ByteTrack via Ultralytics.
-Wraps model.track() and maintains track history for downstream re-ID.
+Frame-to-frame player tracking using BoxMOT's DeepOcSort.
+Uses OSNet (trained on MSMT17 person re-ID dataset) for appearance-based
+re-identification — far stronger than generic models for same-team players.
 """
 import cv2
 import numpy as np
+from pathlib import Path
 from ultralytics import YOLO
+from boxmot import DeepOcSort
 from dataclasses import dataclass, field
 
 import config
@@ -28,66 +31,95 @@ class FrameResult:
 
 
 class Tracker:
-    """ByteTrack player tracker using Ultralytics built-in tracking."""
+    """DeepOcSort player tracker with OSNet re-ID."""
 
     def __init__(self, model_path: str = None):
         path = model_path or str(config.MODEL_PATH)
         self.model = YOLO(path)
         self.player_classes = [config.PLAYER_CLASS_ID, config.GOALKEEPER_CLASS_ID]
-        print(f"[Tracker] Loaded model from {path}")
+        self.tracker = DeepOcSort(
+            reid_weights=Path("osnet_x0_25_msmt17.pt"),
+            device="cpu",
+            half=False,
+        )
+        print(f"[Tracker] Loaded detector from {path}")
+        print(f"[Tracker] DeepOcSort + OSNet re-ID ready")
         print(f"[Tracker] Tracking classes: {self.player_classes}")
+
+    def _detect(self, frame: np.ndarray) -> np.ndarray:
+        """Run detection, return Nx6 array [x1,y1,x2,y2,conf,cls]."""
+        results = self.model(
+            frame,
+            conf=config.DETECTION_CONF,
+            iou=config.DETECTION_IOU,
+            verbose=False,
+        )[0]
+
+        dets = []
+        for box in results.boxes:
+            cls_id = int(box.cls[0])
+            if cls_id not in self.player_classes:
+                continue
+            xyxy = box.xyxy[0].cpu().numpy()
+            x1, y1, x2, y2 = xyxy
+            # Min area filter
+            if (x2 - x1) * (y2 - y1) < 1000:
+                continue
+            conf = float(box.conf[0])
+            dets.append([x1, y1, x2, y2, conf, cls_id])
+
+        return np.array(dets) if dets else np.empty((0, 6))
 
     def track_video(self, video_path: str = None) -> list[FrameResult]:
         """Run tracking on full video. Returns list of FrameResults."""
         path = video_path or str(config.VIDEO_PATH)
-        results = self.model.track(
-            source=path,
-            tracker="botsort_custom.yaml",
-            conf=config.DETECTION_CONF,
-            iou=config.DETECTION_IOU,
-            persist=True,
-            stream=True,
-            classes=self.player_classes,
-            verbose=False,
-        )
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open {path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f"[Video] {path} | {total} frames @ {fps} FPS")
 
         all_frames = []
-        for frame_idx, result in enumerate(results):
-            frame = result.orig_img
+        frame_idx = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
             h, w = frame.shape[:2]
+            dets = self._detect(frame)
+            tracks = self.tracker.update(dets, frame)
+
             frame_result = FrameResult(frame_idx=frame_idx)
 
-            if result.boxes is not None and result.boxes.id is not None:
-                for box in result.boxes:
-                    if box.id is None:
-                        continue
+            for t in tracks:
+                x1, y1, x2, y2, tid, conf, cls, idx = t
+                x1, y1 = max(0, int(x1)), max(0, int(y1))
+                x2, y2 = min(w, int(x2)), min(h, int(y2))
 
-                    track_id = int(box.id[0])
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                crop = frame[y1:y2, x1:x2].copy()
+                if crop.size == 0:
+                    continue
 
-                    x1, y1, x2, y2 = xyxy
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
-
-                    crop = frame[y1:y2, x1:x2].copy()
-                    if crop.size == 0:
-                        continue
-
-                    frame_result.players.append(TrackedPlayer(
-                        track_id=track_id,
-                        bbox=xyxy,
-                        conf=conf,
-                        class_id=cls_id,
-                        crop=crop,
-                    ))
+                frame_result.players.append(TrackedPlayer(
+                    track_id=int(tid),
+                    bbox=np.array([x1, y1, x2, y2]),
+                    conf=float(conf),
+                    class_id=int(cls),
+                    crop=crop,
+                ))
 
             all_frames.append(frame_result)
 
             if frame_idx % 50 == 0:
                 print(f"  [Frame {frame_idx}] {len(frame_result.players)} players tracked")
 
+            frame_idx += 1
+
+        cap.release()
         print(f"[Tracker] Done. {len(all_frames)} frames processed.")
         return all_frames
 
@@ -121,9 +153,9 @@ if __name__ == "__main__":
         start, end = track_spans[tid]
         print(f"  Track {tid}: frames {start}-{end} ({end - start + 1} frames)")
 
-    # Save summary to output
+    # Save summary
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = config.OUTPUT_DIR / "step2_tracking_summary.txt"
+    out_path = config.OUTPUT_DIR / "step7_deepocsort_summary.txt"
     with open(out_path, "w") as f:
         f.write(f"Total frames: {len(frames)}\n")
         f.write(f"Unique track IDs: {len(all_ids)}\n")
