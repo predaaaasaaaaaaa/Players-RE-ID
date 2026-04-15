@@ -42,6 +42,9 @@ class Tracker:
             reid_weights=Path("osnet_x0_25_msmt17.pt"),
             device="cpu",
             half=False,
+            max_age=150,
+            min_hits=1,
+            iou_threshold=0.2,
         )
         print(f"[Tracker] Loaded detector from {path}")
         print(f"[Tracker] DeepOcSort + OSNet re-ID ready")
