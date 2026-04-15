@@ -3,6 +3,7 @@ Frame-to-frame player tracking using BoxMOT's DeepOcSort.
 Uses OSNet (trained on MSMT17 person re-ID dataset) for appearance-based
 re-identification — far stronger than generic models for same-team players.
 """
+import kalman_patch
 import cv2
 import numpy as np
 from pathlib import Path
