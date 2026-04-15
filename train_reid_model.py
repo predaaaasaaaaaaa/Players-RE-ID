@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────
-FILTERED_DIR = Path("data/reid_filtered")
+FILTERED_DIR = Path("data/rf")
 TRAIN_DIR = Path("data/reid_train")
 QUERY_DIR = Path("data/reid_query")
 GALLERY_DIR = Path("data/reid_gallery")

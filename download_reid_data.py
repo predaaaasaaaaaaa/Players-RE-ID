@@ -16,7 +16,7 @@ from collections import defaultdict
 
 # ── Config ─────────────────────────────────────────────
 SOCCERNET_DIR = Path("data/soccernet_reid")
-FILTERED_DIR = Path("data/reid_filtered")
+FILTERED_DIR = Path("data/rf")
 TARGET_SAMPLES = 30000
 MIN_HEIGHT = 50
 MIN_SAMPLES_PER_ID = 3
@@ -126,12 +126,6 @@ def collect_and_filter():
 
     print(f"[Filter] After capping {MAX_SAMPLES_PER_ID}/ID: {len(selected)} samples")
 
-    # Filter 5: If still too many, subsample identities
-    if len(selected) > TARGET_SAMPLES:
-        random.shuffle(selected)
-        selected = selected[:TARGET_SAMPLES]
-        print(f"[Filter] Subsampled to {TARGET_SAMPLES}")
-
     # Organize into torchreid format: filtered_dir/<id>/<image>.png
     FILTERED_DIR.mkdir(parents=True, exist_ok=True)
     id_counter = 0
@@ -146,9 +140,12 @@ def collect_and_filter():
         id_dir = FILTERED_DIR / f"{numeric_id:05d}"
         id_dir.mkdir(exist_ok=True)
 
-        dst = id_dir / sample["info"]["filename"]
+        dst = id_dir / f"{sample['info']['bbox_idx']}.png"
         if not dst.exists():
-            shutil.copy2(sample["path"], dst)
+            # Windows long path fix
+            src = "\\\\?\\" + str(sample["path"].resolve())
+            dst_str = "\\\\?\\" + str(dst.resolve())
+            shutil.copy2(src, dst_str)
 
     # Count results
     total_files = sum(1 for _ in FILTERED_DIR.rglob("*.png"))
