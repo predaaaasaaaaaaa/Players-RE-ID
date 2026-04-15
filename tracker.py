@@ -68,7 +68,7 @@ class Tracker:
             conf = float(box.conf[0])
             dets.append([x1, y1, x2, y2, conf, cls_id])
 
-        return np.array(dets) if dets else np.empty((0, 6))
+        return np.array(dets, dtype=np.float32) if dets else np.empty((0, 6), dtype=np.float32)
 
     def track_video(self, video_path: str = None) -> list[FrameResult]:
         """Run tracking on full video. Returns list of FrameResults."""
