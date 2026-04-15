@@ -53,7 +53,7 @@ class Detector:
             
             # Filter out tiny partial detections (ghost players)
             box_area = (x2 - x1) * (y2 - y1)
-            if box_area < 1000:
+            if box_area < 1500:
                 continue
  
             if crop.size == 0:
