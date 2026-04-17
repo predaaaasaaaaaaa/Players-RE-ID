@@ -19,9 +19,9 @@ import torchreid
 class FeatureExtractor:
     """Extract appearance features from player crops using OSNet-AIN."""
 
-    # Fusion weights — deep carries more signal, HSV anchors jersey color
-    W_HSV = 0.4
-    W_DEEP = 0.6
+    # Fusion weights — HSV redundant with TeamClassifier gate, deep is cleaner signal
+    W_HSV = 0.0
+    W_DEEP = 1.0
 
     def __init__(self, device: str = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")

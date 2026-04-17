@@ -24,7 +24,7 @@ TRACK_LOW_THRESH = 0.05       # lower = rescue more low-conf detections
 TRACK_BUFFER = 90             # 3x longer buffer to hold lost tracks (was 30)
 
 # ── Re-ID ──────────────────────────────────────────────
-REID_SIMILARITY_THRESH = 0.80  # weighted cosine (0.4*hsv + 0.6*deep) — raised from 0.6 after fine-tuned OSNet shifted distribution upward
+REID_SIMILARITY_THRESH = 0.66  # deep-only cosine (HSV disabled), from similarity diagnostic
 GALLERY_EMA_ALPHA = 0.9       # exponential moving average for gallery updates
 REID_MODEL_NAME = "osnet_x0_25"  # lightweight OSNet variant
 
