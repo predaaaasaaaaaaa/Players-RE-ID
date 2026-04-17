@@ -44,61 +44,51 @@ def main():
 
     print(f"[Diag] Extracted {len(feats)} feature vectors")
 
-    # Same-player pairs: same tid, different frames
-    same_sims = []
+    # Compute three similarity variants per pair: hsv-only, deep-only, combined
+    def sim_hsv(a, b):
+        return float(np.dot(a["hsv"], b["hsv"]))
+    def sim_deep(a, b):
+        return float(np.dot(a["deep"], b["deep"]))
+    def sim_comb(a, b):
+        return extractor.similarity(a, b)
+
+    same_hsv, same_deep, same_comb = [], [], []
     for tid in stable_tracks:
         tid_keys = [k for k in feats if k[0] == tid]
         if len(tid_keys) < 2:
             continue
-        # All unique pairs within this track
         for i in range(len(tid_keys)):
             for j in range(i + 1, len(tid_keys)):
-                sim = extractor.similarity(feats[tid_keys[i]], feats[tid_keys[j]])
-                same_sims.append(sim)
+                a, b = feats[tid_keys[i]], feats[tid_keys[j]]
+                same_hsv.append(sim_hsv(a, b))
+                same_deep.append(sim_deep(a, b))
+                same_comb.append(sim_comb(a, b))
 
-    # Different-player pairs: different tids
-    diff_sims = []
+    diff_hsv, diff_deep, diff_comb = [], [], []
     all_keys = list(feats.keys())
-    # Sample up to 2000 random different-pair comparisons
     n_samples = min(2000, len(all_keys) * (len(all_keys) - 1) // 2)
     for _ in range(n_samples):
-        a, b = random.sample(all_keys, 2)
-        if a[0] == b[0]:
+        a_k, b_k = random.sample(all_keys, 2)
+        if a_k[0] == b_k[0]:
             continue
-        sim = extractor.similarity(feats[a], feats[b])
-        diff_sims.append(sim)
+        a, b = feats[a_k], feats[b_k]
+        diff_hsv.append(sim_hsv(a, b))
+        diff_deep.append(sim_deep(a, b))
+        diff_comb.append(sim_comb(a, b))
 
-    same_sims = np.array(same_sims)
-    diff_sims = np.array(diff_sims)
+    def report(name, same, diff):
+        same, diff = np.array(same), np.array(diff)
+        lo = np.percentile(same, 5)
+        hi = np.percentile(diff, 95)
+        gap = lo - hi
+        print(f"\n=== {name} ===")
+        print(f"  same: mean={same.mean():.4f}  5%={lo:.4f}  50%={np.percentile(same,50):.4f}")
+        print(f"  diff: mean={diff.mean():.4f}  95%={hi:.4f}  50%={np.percentile(diff,50):.4f}")
+        print(f"  gap = {gap:+.4f}  recommended thresh = {(lo+hi)/2:.2f}")
 
-    print(f"\n=== SAME-player pairs (n={len(same_sims)}) ===")
-    print(f"  mean={same_sims.mean():.4f}  std={same_sims.std():.4f}")
-    print(f"  min ={same_sims.min():.4f}   max ={same_sims.max():.4f}")
-    print(f"  percentiles: 5%={np.percentile(same_sims, 5):.4f}  "
-          f"25%={np.percentile(same_sims, 25):.4f}  "
-          f"50%={np.percentile(same_sims, 50):.4f}  "
-          f"75%={np.percentile(same_sims, 75):.4f}")
-
-    print(f"\n=== DIFFERENT-player pairs (n={len(diff_sims)}) ===")
-    print(f"  mean={diff_sims.mean():.4f}  std={diff_sims.std():.4f}")
-    print(f"  min ={diff_sims.min():.4f}   max ={diff_sims.max():.4f}")
-    print(f"  percentiles: 75%={np.percentile(diff_sims, 75):.4f}  "
-          f"90%={np.percentile(diff_sims, 90):.4f}  "
-          f"95%={np.percentile(diff_sims, 95):.4f}  "
-          f"99%={np.percentile(diff_sims, 99):.4f}")
-
-    # Recommended threshold = midpoint between same-5% and diff-95%
-    lo = np.percentile(same_sims, 5)
-    hi = np.percentile(diff_sims, 95)
-    gap = lo - hi
-    recommended = (lo + hi) / 2
-
-    print(f"\n=== SEPARATION ===")
-    print(f"  same-5%     = {lo:.4f}  (95% of true matches above this)")
-    print(f"  diff-95%    = {hi:.4f}  (95% of non-matches below this)")
-    print(f"  gap         = {gap:+.4f}  ({'GOOD' if gap > 0 else 'BAD — distributions overlap'})")
-    print(f"  recommended REID_SIMILARITY_THRESH = {recommended:.2f}")
-
+    report("HSV only",      same_hsv,  diff_hsv)
+    report("Deep only",     same_deep, diff_deep)
+    report("Combined 0.4/0.6", same_comb, diff_comb)
 
 if __name__ == "__main__":
     main()
