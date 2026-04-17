@@ -14,7 +14,7 @@ Takes a single-feed football clip in → writes an annotated MP4 out, where each
 Pipeline:
 
 ```
-YOLOv8 detection  →  BoT-SORT tracking  →  team classification
+YOLOv11 detection  →  BoT-SORT tracking  →  team classification
                                                  ↓
 annotated video  ←  ReID matcher (gallery + EMA + team constraint)
 ```
@@ -26,7 +26,7 @@ annotated video  ←  ReID matcher (gallery + EMA + team constraint)
 - **Python 3.12** (tested on 3.12.10)
 - A GPU is optional — CPU works, just slower
 - Windows / Linux / macOS
-
+- YOLOv11 model provided by Liat.ai
 ---
 
 ## Setup
@@ -52,6 +52,10 @@ pip install torch==2.6.0 torchvision==0.21.0
 
 # 4. Install the rest
 pip install -r requirements.txt
+
+# 5. Add model + input.mp4
+input.mp4 --> data/
+model.pt (YOLOv11) --> models/
 ```
 
 First run will auto-download the OSNet ReID weights (~10MB) from torchreid.
