@@ -70,7 +70,7 @@ python visualizer.py
 
 Output: `output/result.mp4` — the annotated video with consistent player IDs.
 
-That's it. No flags, no args. The input clip and YOLO model are already in the repo.
+That's it. No flags, no args. The input clip is already in the repo.
 
 ---
 
@@ -95,7 +95,7 @@ Players-RE-ID/
 
 ## How it works (in 30 seconds)
 
-1. **Detect** — YOLOv8 finds players (class 2) and goalkeepers (class 1) each frame. Ghost detections filtered by min bbox area (1500px²).
+1. **Detect** — YOLOv11 finds players (class 2) and goalkeepers (class 1) each frame. Ghost detections filtered by min bbox area (1500px²).
 2. **Track** — BoT-SORT assigns short-term track IDs and handles frame-to-frame matching with its own re-ID head.
 3. **Classify teams** — KMeans on HSV color histograms from the first 5 frames splits everyone into two clusters (City vs United).
 4. **Match re-IDs** — when a player disappears and a new ByteTrack ID appears later, we compare the new crop's feature vector (HSV + OSNet) against lost players' gallery. Match requires:
