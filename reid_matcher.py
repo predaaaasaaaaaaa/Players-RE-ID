@@ -66,7 +66,7 @@ class ReIDMatcher:
     MIN_PROXIMITY = 60
     MIN_CROP_HEIGHT = 40
     MIN_ASPECT_RATIO = 1.0
-    DIRTY_LOSS_PENALTY = 0.15      # extra similarity needed for collision-lost IDs
+    DIRTY_LOSS_PENALTY = 0.10      # extra similarity needed for collision-lost IDs
     EDGE_MARGIN = 80               # pixels from frame edge to count as camera-pan loss
 
     def __init__(self):
