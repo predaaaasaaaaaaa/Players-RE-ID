@@ -22,16 +22,31 @@ class FeatureExtractor:
         print(f"[FeatureExtractor] OSNet re-ID on {self.device}")
 
     def _init_deep_model(self):
-        """Load OSNet trained on MSMT17 — a proper person re-ID model."""
+        """Load OSNet fine-tuned on SoccerNet ReID data."""
+        import torch
+        from pathlib import Path
+        
         self.model = torchreid.models.build_model(
             name="osnet_x0_25",
-            num_classes=1000,
+            num_classes=1000,  # placeholder, we discard classifier
             loss="softmax",
-            pretrained=True,
+            pretrained=False,  # we'll load our own weights
         )
+        
+        # Load our fine-tuned weights
+        checkpoint_path = Path("models/osnet_soccer/model/model.pth.tar-50")
+        if checkpoint_path.exists():
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            state_dict = checkpoint.get("state_dict", checkpoint)
+            # Strip classifier keys (num_classes mismatch)
+            state_dict = {k: v for k, v in state_dict.items() if "classifier" not in k}
+            self.model.load_state_dict(state_dict, strict=False)
+            print(f"[FeatureExtractor] Loaded fine-tuned OSNet from {checkpoint_path}")
+        else:
+            print(f"[FeatureExtractor] WARNING: {checkpoint_path} not found, using ImageNet pretrained")
+        
         self.model.eval()
         self.model = self.model.to(self.device)
-        # Remove classifier — we only want embeddings
         self.model.classifier = torch.nn.Identity()
 
     def _init_transform(self):

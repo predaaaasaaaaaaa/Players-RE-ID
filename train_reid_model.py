@@ -167,6 +167,7 @@ def train():
         batch_size_train=BATCH_SIZE,
         batch_size_test=100,
         transforms=["random_flip", "color_jitter", "random_erase"],
+        workers=0,
     )
 
     num_classes = datamanager.num_train_pids
