@@ -1,9 +1,13 @@
 """
 Player re-identification via appearance matching.
 Maintains a gallery of player feature embeddings and resolves
-new ByteTrack IDs against lost tracks using cosine similarity.
+new ByteTrack IDs against lost tracks using weighted cosine similarity.
 
-Includes four layers of gallery protection (Confident Track Storage):
+Features are stored as dicts {"hsv":..., "deep":...} and fused via
+FeatureExtractor.similarity() — NOT concatenated — to prevent the
+512-dim deep vector from drowning out the 78-dim HSV signal.
+
+Includes five layers of gallery protection (Confident Track Storage):
   1. Team constraint     — never match across teams
   2. Occlusion detection — skip gallery update when player overlaps another
   3. Crop quality gate   — only update gallery with high-conf, clean crops
@@ -19,7 +23,6 @@ Flow per frame:
   4. Missing IDs → mark as lost, tag HOW they were lost
 """
 import numpy as np
-from scipy.spatial.distance import cosine
 
 import config
 from feature_extractor import FeatureExtractor
@@ -48,6 +51,12 @@ def _bbox_center_dist(a, b):
     return np.sqrt((cx_a - cx_b)**2 + (cy_a - cy_b)**2)
 
 
+def _l2_normalize(v: np.ndarray) -> np.ndarray:
+    """L2-normalize a vector, safe for zero vectors."""
+    norm = np.linalg.norm(v)
+    return v / norm if norm > 0 else v
+
+
 class ReIDMatcher:
     """Manages player identity with confident track storage."""
 
@@ -63,7 +72,7 @@ class ReIDMatcher:
     def __init__(self):
         self.extractor = FeatureExtractor()
         self.team_classifier = TeamClassifier()
-        self.gallery = {}          # {consistent_id: feature_vector}
+        self.gallery = {}          # {consistent_id: {"hsv": np.ndarray, "deep": np.ndarray}}
         self.team_labels = {}      # {consistent_id: team_label (0 or 1)}
         self.id_map = {}           # {bytetrack_id: consistent_id}
         self.active_ids = set()    # consistent IDs seen in current frame
@@ -78,19 +87,14 @@ class ReIDMatcher:
         """Fit team classifier on a batch of crops (from first N frames)."""
         self.team_classifier.fit(all_crops)
 
-    def _cosine_sim(self, a: np.ndarray, b: np.ndarray) -> float:
-        """Cosine similarity between two feature vectors."""
-        return 1.0 - cosine(a, b)
-
     def _was_near_edge(self, cid) -> bool:
         """Was player near frame edge when lost? (camera pan = clean loss)."""
         if cid not in self.last_bbox:
             return False
         bbox = self.last_bbox[cid]
-        # Near left or right edge → camera pan
         return bbox[0] < self.EDGE_MARGIN or bbox[2] > 1280 - self.EDGE_MARGIN
 
-    def _find_best_match(self, feat: np.ndarray, team: int) -> tuple[int | None, float]:
+    def _find_best_match(self, feat: dict, team: int) -> tuple[int | None, float]:
         """Compare feature against lost gallery entries of the SAME team.
         Dirty-lost IDs (collision) need higher similarity to match.
         """
@@ -111,7 +115,7 @@ class ReIDMatcher:
             else:
                 thresh = config.REID_SIMILARITY_THRESH
 
-            sim = self._cosine_sim(feat, self.gallery[cid])
+            sim = self.extractor.similarity(feat, self.gallery[cid])
             if sim > best_sim and sim >= thresh:
                 best_sim = sim
                 best_id = cid
@@ -120,16 +124,19 @@ class ReIDMatcher:
             return best_id, best_sim
         return None, best_sim
 
-    def _update_gallery(self, cid: int, feat: np.ndarray):
-        """Update gallery entry with exponential moving average."""
+    def _update_gallery(self, cid: int, feat: dict):
+        """Update gallery entry with per-component exponential moving average."""
         if cid in self.gallery:
             alpha = config.GALLERY_EMA_ALPHA
-            self.gallery[cid] = alpha * self.gallery[cid] + (1 - alpha) * feat
-            norm = np.linalg.norm(self.gallery[cid])
-            if norm > 0:
-                self.gallery[cid] /= norm
+            old = self.gallery[cid]
+            new_hsv = alpha * old["hsv"] + (1 - alpha) * feat["hsv"]
+            new_deep = alpha * old["deep"] + (1 - alpha) * feat["deep"]
+            self.gallery[cid] = {
+                "hsv": _l2_normalize(new_hsv),
+                "deep": _l2_normalize(new_deep),
+            }
         else:
-            self.gallery[cid] = feat.copy()
+            self.gallery[cid] = {"hsv": feat["hsv"].copy(), "deep": feat["deep"].copy()}
 
     def _is_crop_clean(self, player, all_players) -> bool:
         """Check if this player's crop is clean enough to update gallery."""
@@ -180,16 +187,14 @@ class ReIDMatcher:
                 # Known track
                 cid = self.id_map[bt_id]
 
-                # ONLY update gallery if crop is clean
                 if is_clean:
-                    feat = self.extractor.extract(player.crop)["combined"]
+                    feat = self.extractor.extract(player.crop)
                     self._update_gallery(cid, feat)
 
                 if team != -1:
                     self.team_labels[cid] = team
                 frame_mapping[bt_id] = cid
 
-                # Always update last known position
                 self.last_bbox[cid] = player.bbox.copy()
 
                 if cid in self.lost_ids:
@@ -200,7 +205,7 @@ class ReIDMatcher:
                         del self.lost_dirty[cid]
             else:
                 # New ByteTrack ID → try to match against lost (same team only)
-                feat = self.extractor.extract(player.crop)["combined"]
+                feat = self.extractor.extract(player.crop)
                 match_id, sim = self._find_best_match(feat, team)
 
                 if match_id is not None:
@@ -219,7 +224,7 @@ class ReIDMatcher:
                     cid = self.next_id
                     self.next_id += 1
                     self.id_map[bt_id] = cid
-                    self.gallery[cid] = feat.copy()
+                    self.gallery[cid] = {"hsv": feat["hsv"].copy(), "deep": feat["deep"].copy()}
                     if team != -1:
                         self.team_labels[cid] = team
                     self.last_bbox[cid] = player.bbox.copy()
@@ -233,7 +238,6 @@ class ReIDMatcher:
         for cid in newly_lost:
             self.lost_ids.add(cid)
             self.lost_frame_count[cid] = 0
-            # Tag: near edge = clean loss (camera pan), otherwise = dirty (collision)
             self.lost_dirty[cid] = not self._was_near_edge(cid)
 
         stale = []
@@ -293,12 +297,3 @@ if __name__ == "__main__":
     print(f"Team 0: {len(t0)} players {sorted(t0)}")
     print(f"Team 1: {len(t1)} players {sorted(t1)}")
     print(f"Unclassified: {len(tn)} players {sorted(tn)}")
-
-    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = config.OUTPUT_DIR / "reid_confident_storage.txt"
-    with open(out_path, "w") as f:
-        f.write(f"Consistent IDs after re-ID: {len(all_consistent)}\n")
-        f.write(f"Team 0: {len(t0)} players {sorted(t0)}\n")
-        f.write(f"Team 1: {len(t1)} players {sorted(t1)}\n")
-        f.write(f"Unclassified: {len(tn)} players {sorted(tn)}\n")
-    print(f"[Saved] {out_path}")
