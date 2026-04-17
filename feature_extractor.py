@@ -2,8 +2,10 @@
 Appearance feature extraction for player re-identification.
 Combines two signals:
   1. HSV color histogram  — captures jersey color (fast, robust)
-  2. Deep embedding        — OSNet pretrained on MSMT17 person re-ID dataset
-Both are L2-normalized and concatenated into a single feature vector.
+  2. Deep embedding        — OSNet fine-tuned on SoccerNet ReID dataset
+Each signal is L2-normalized independently. Similarity is computed
+as a weighted sum of per-signal cosine similarities (not concatenated),
+preventing the 512-dim deep vector from drowning out the 78-dim HSV.
 """
 import cv2
 import numpy as np
@@ -15,6 +17,10 @@ import torchreid
 class FeatureExtractor:
     """Extract appearance features from player crops using OSNet."""
 
+    # Fusion weights — tuned for fine-tuned OSNet (which clusters tightly)
+    W_HSV = 0.4
+    W_DEEP = 0.6
+
     def __init__(self, device: str = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._init_deep_model()
@@ -23,28 +29,25 @@ class FeatureExtractor:
 
     def _init_deep_model(self):
         """Load OSNet fine-tuned on SoccerNet ReID data."""
-        import torch
         from pathlib import Path
-        
+
         self.model = torchreid.models.build_model(
             name="osnet_x0_25",
-            num_classes=1000,  # placeholder, we discard classifier
+            num_classes=1000,
             loss="softmax",
-            pretrained=False,  # we'll load our own weights
+            pretrained=False,
         )
-        
-        # Load our fine-tuned weights
+
         checkpoint_path = Path("models/osnet_soccer/model/model.pth.tar-50")
         if checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             state_dict = checkpoint.get("state_dict", checkpoint)
-            # Strip classifier keys (num_classes mismatch)
             state_dict = {k: v for k, v in state_dict.items() if "classifier" not in k}
             self.model.load_state_dict(state_dict, strict=False)
             print(f"[FeatureExtractor] Loaded fine-tuned OSNet from {checkpoint_path}")
         else:
             print(f"[FeatureExtractor] WARNING: {checkpoint_path} not found, using ImageNet pretrained")
-        
+
         self.model.eval()
         self.model = self.model.to(self.device)
         self.model.classifier = torch.nn.Identity()
@@ -82,17 +85,22 @@ class FeatureExtractor:
         norm = np.linalg.norm(feat)
         if norm > 0:
             feat = feat / norm
-        return feat  # 512-dim (OSNet)
+        return feat  # 512-dim
 
     def extract(self, crop: np.ndarray) -> dict:
-        """Extract both features from a player crop."""
+        """Extract both features from a player crop. No concatenation."""
         hsv = self.extract_hsv(crop)
         deep = self.extract_deep(crop)
-        combined = np.concatenate([hsv, deep])
-        norm = np.linalg.norm(combined)
-        if norm > 0:
-            combined = combined / norm
-        return {"hsv": hsv, "deep": deep, "combined": combined}
+        return {"hsv": hsv, "deep": deep}
+
+    @staticmethod
+    def similarity(feat_a: dict, feat_b: dict) -> float:
+        """Weighted cosine similarity between two feature dicts.
+        Each component is already L2-normalized, so dot product = cosine.
+        """
+        cos_hsv = float(np.dot(feat_a["hsv"], feat_b["hsv"]))
+        cos_deep = float(np.dot(feat_a["deep"], feat_b["deep"]))
+        return FeatureExtractor.W_HSV * cos_hsv + FeatureExtractor.W_DEEP * cos_deep
 
 
 # ── Quick test ─────────────────────────────────────────
@@ -112,12 +120,10 @@ if __name__ == "__main__":
 
     for i, d in enumerate(dets[:3]):
         feats = extractor.extract(d.crop)
-        print(f"  Player {i}: hsv={feats['hsv'].shape}, "
-              f"deep={feats['deep'].shape}, "
-              f"combined={feats['combined'].shape}")
+        print(f"  Player {i}: hsv={feats['hsv'].shape}, deep={feats['deep'].shape}")
 
-    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for i, d in enumerate(dets):
-        path = config.OUTPUT_DIR / f"crop_{i}.jpg"
-        cv2.imwrite(str(path), d.crop)
-    print(f"[Saved] {len(dets)} crops to {config.OUTPUT_DIR}")
+    if len(dets) >= 2:
+        f0 = extractor.extract(dets[0].crop)
+        f1 = extractor.extract(dets[1].crop)
+        sim = extractor.similarity(f0, f1)
+        print(f"  Sim(player0, player1) = {sim:.4f}")
