@@ -7,3 +7,4 @@ models/
 venv/
 data/*
 !data/15sec_input_720p.mp4
+models/*.pt
