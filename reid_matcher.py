@@ -1,13 +1,17 @@
 """
 Player re-identification via appearance matching.
-Maintains a gallery of player feature embeddings and resolves
-new ByteTrack IDs against lost tracks using weighted cosine similarity.
+Uses TRACKLET-CENTROID matching (SoccerNet GSR, Sports Re-ID papers):
+instead of storing a single EMA vector per identity, we keep a sliding
+window of the last K clean embeddings and match new detections against
+their MEAN. This cancels per-frame pose/scale noise that would otherwise
+make single-vector matching unreliable across camera cuts.
 
-Features are stored as dicts {"hsv":..., "deep":...} and fused via
-FeatureExtractor.similarity() — NOT concatenated — to prevent the
-512-dim deep vector from drowning out the 78-dim HSV signal.
+Features are stored per-component (hsv, deep) and fused via
+FeatureExtractor.similarity() — not concatenated — so the 512-dim deep
+vector does not drown out the 78-dim HSV signal (though with W_HSV=0
+the deep signal dominates anyway; HSV is kept wired for future ablation).
 
-Includes five layers of gallery protection (Confident Track Storage):
+Five layers of gallery protection (Confident Track Storage):
   1. Team constraint     — never match across teams
   2. Occlusion detection — skip gallery update when player overlaps another
   3. Crop quality gate   — only update gallery with high-conf, clean crops
@@ -15,13 +19,15 @@ Includes five layers of gallery protection (Confident Track Storage):
   5. Dirty/clean loss    — collision-lost IDs need higher similarity to re-match
 
 Flow per frame:
-  1. Detect occlusions + proximity between all players in frame
-  2. Known track IDs → update gallery ONLY if crop is clean (not occluded)
-  3. New track IDs → compare against lost tracks' gallery (same team only)
+  1. Pre-compute which crops are clean (no occlusion, good size/conf)
+  2. Known track IDs → append feature to tracklet ONLY if crop is clean
+  3. New track IDs → compare against lost tracks' centroids (same team only)
      - Clean-lost IDs (camera pan) → normal threshold
      - Dirty-lost IDs (collision)  → higher threshold to prevent stolen IDs
   4. Missing IDs → mark as lost, tag HOW they were lost
 """
+from collections import deque
+
 import numpy as np
 
 import config
@@ -58,7 +64,7 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
 
 
 class ReIDMatcher:
-    """Manages player identity with confident track storage."""
+    """Manages player identity with tracklet-centroid matching."""
 
     # Quality thresholds
     MIN_CONF_FOR_GALLERY = 0.65
@@ -69,19 +75,25 @@ class ReIDMatcher:
     DIRTY_LOSS_PENALTY = 0.10      # extra similarity needed for collision-lost IDs
     EDGE_MARGIN = 80               # pixels from frame edge to count as camera-pan loss
 
+    # Tracklet centroid — sliding window of clean embeddings per identity
+    TRACKLET_WINDOW = 30           # max clean features kept per identity
+
     def __init__(self):
         self.extractor = FeatureExtractor()
         self.team_classifier = TeamClassifier()
-        self.gallery = {}          # {consistent_id: {"hsv": np.ndarray, "deep": np.ndarray}}
+        # Tracklet storage: {consistent_id: {"hsv": deque[np.ndarray], "deep": deque[np.ndarray]}}
+        self.tracklets = {}
+        # Cached centroids (recomputed on tracklet update): {consistent_id: {"hsv":..., "deep":...}}
+        self.gallery = {}
         self.team_labels = {}      # {consistent_id: team_label (0 or 1)}
         self.id_map = {}           # {bytetrack_id: consistent_id}
-        self.active_ids = set()    # consistent IDs seen in current frame
-        self.lost_ids = set()      # consistent IDs not seen recently
-        self.next_id = 1           # counter for new consistent IDs
-        self.lost_frame_count = {} # {consistent_id: frames_since_lost}
+        self.active_ids = set()
+        self.lost_ids = set()
+        self.next_id = 1
+        self.lost_frame_count = {}
         self.max_lost_frames = 150
-        self.lost_dirty = {}       # {consistent_id: True if lost during collision}
-        self.last_bbox = {}        # {consistent_id: last known [x1,y1,x2,y2]}
+        self.lost_dirty = {}
+        self.last_bbox = {}
 
     def fit_teams(self, all_crops: list[np.ndarray]):
         """Fit team classifier on a batch of crops (from first N frames)."""
@@ -94,8 +106,29 @@ class ReIDMatcher:
         bbox = self.last_bbox[cid]
         return bbox[0] < self.EDGE_MARGIN or bbox[2] > 1280 - self.EDGE_MARGIN
 
+    def _compute_centroid(self, cid: int):
+        """Mean of all clean embeddings in the tracklet, L2-normalized."""
+        t = self.tracklets[cid]
+        hsv_mean = np.mean(np.stack(list(t["hsv"])), axis=0)
+        deep_mean = np.mean(np.stack(list(t["deep"])), axis=0)
+        self.gallery[cid] = {
+            "hsv": _l2_normalize(hsv_mean),
+            "deep": _l2_normalize(deep_mean),
+        }
+
+    def _append_to_tracklet(self, cid: int, feat: dict):
+        """Append a clean feature to the tracklet window and refresh centroid."""
+        if cid not in self.tracklets:
+            self.tracklets[cid] = {
+                "hsv": deque(maxlen=self.TRACKLET_WINDOW),
+                "deep": deque(maxlen=self.TRACKLET_WINDOW),
+            }
+        self.tracklets[cid]["hsv"].append(feat["hsv"].copy())
+        self.tracklets[cid]["deep"].append(feat["deep"].copy())
+        self._compute_centroid(cid)
+
     def _find_best_match(self, feat: dict, team: int) -> tuple[int | None, float]:
-        """Compare feature against lost gallery entries of the SAME team.
+        """Compare feature against lost tracklet centroids of the SAME team.
         Dirty-lost IDs (collision) need higher similarity to match.
         """
         best_id = None
@@ -104,12 +137,10 @@ class ReIDMatcher:
         for cid in self.lost_ids:
             if cid not in self.gallery:
                 continue
-            # Hard constraint: skip if different team
             if team != -1 and self.team_labels.get(cid, -1) != -1:
                 if self.team_labels[cid] != team:
                     continue
 
-            # Dirty-lost = collision, need higher bar to prevent stolen IDs
             if self.lost_dirty.get(cid, False):
                 thresh = config.REID_SIMILARITY_THRESH + self.DIRTY_LOSS_PENALTY
             else:
@@ -124,22 +155,8 @@ class ReIDMatcher:
             return best_id, best_sim
         return None, best_sim
 
-    def _update_gallery(self, cid: int, feat: dict):
-        """Update gallery entry with per-component exponential moving average."""
-        if cid in self.gallery:
-            alpha = config.GALLERY_EMA_ALPHA
-            old = self.gallery[cid]
-            new_hsv = alpha * old["hsv"] + (1 - alpha) * feat["hsv"]
-            new_deep = alpha * old["deep"] + (1 - alpha) * feat["deep"]
-            self.gallery[cid] = {
-                "hsv": _l2_normalize(new_hsv),
-                "deep": _l2_normalize(new_deep),
-            }
-        else:
-            self.gallery[cid] = {"hsv": feat["hsv"].copy(), "deep": feat["deep"].copy()}
-
     def _is_crop_clean(self, player, all_players) -> bool:
-        """Check if this player's crop is clean enough to update gallery."""
+        """Check if this player's crop is clean enough to update the tracklet."""
         bbox = player.bbox
         h = bbox[3] - bbox[1]
         w = bbox[2] - bbox[0]
@@ -172,7 +189,6 @@ class ReIDMatcher:
         current_bt_ids = set()
         frame_mapping = {}
 
-        # Pre-compute which players have clean crops
         clean_flags = {}
         for player in players:
             clean_flags[player.track_id] = self._is_crop_clean(player, players)
@@ -189,7 +205,7 @@ class ReIDMatcher:
 
                 if is_clean:
                     feat = self.extractor.extract(player.crop)
-                    self._update_gallery(cid, feat)
+                    self._append_to_tracklet(cid, feat)
 
                 if team != -1:
                     self.team_labels[cid] = team
@@ -204,14 +220,14 @@ class ReIDMatcher:
                     if cid in self.lost_dirty:
                         del self.lost_dirty[cid]
             else:
-                # New ByteTrack ID → try to match against lost (same team only)
+                # New ByteTrack ID → try to match against lost centroids (same team only)
                 feat = self.extractor.extract(player.crop)
                 match_id, sim = self._find_best_match(feat, team)
 
                 if match_id is not None:
                     self.id_map[bt_id] = match_id
                     if is_clean:
-                        self._update_gallery(match_id, feat)
+                        self._append_to_tracklet(match_id, feat)
                     self.lost_ids.discard(match_id)
                     if match_id in self.lost_frame_count:
                         del self.lost_frame_count[match_id]
@@ -220,11 +236,12 @@ class ReIDMatcher:
                     self.last_bbox[match_id] = player.bbox.copy()
                     frame_mapping[bt_id] = match_id
                 else:
-                    # Genuinely new player
+                    # Genuinely new player — seed tracklet even if crop not clean
+                    # (we need at least one feature to have a centroid)
                     cid = self.next_id
                     self.next_id += 1
                     self.id_map[bt_id] = cid
-                    self.gallery[cid] = {"hsv": feat["hsv"].copy(), "deep": feat["deep"].copy()}
+                    self._append_to_tracklet(cid, feat)
                     if team != -1:
                         self.team_labels[cid] = team
                     self.last_bbox[cid] = player.bbox.copy()
