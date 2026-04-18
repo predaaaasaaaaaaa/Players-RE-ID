@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-Built a single-feed player re-identification pipeline from scratch over 3 days. Final result: **4 correct re-IDs** across the clip with 18 unique consistent IDs. The pipeline combines YOLOv8 detection, BoT-SORT tracking, KMeans team classification, and an OSNet-based re-ID matcher with a 5-layer "confident track storage" gating system.
+Built a single-feed player re-identification pipeline from scratch over 5 days. Final result: **4 correct re-IDs** across the clip with 18 unique consistent IDs. The pipeline combines YOLOv8 detection, BoT-SORT tracking, KMeans team classification, and an OSNet-based re-ID matcher with a 5-layer "confident track storage" gating system.
 
 Along the way I tried 5 different tracker/embedding combinations, fine-tuned OSNet on 49K SoccerNet images for 50 epochs, built a custom similarity-distribution diagnostic tool, and eventually learned something important: **on a 15-second broadcast clip of two teams in identical jerseys, the ceiling on appearance-only re-ID is genuinely low, and better embeddings alone cannot break it.** The report explains why, with data.
 
@@ -33,7 +33,7 @@ Input video (15sec_input_720p.mp4)
     │
     ▼
 ┌──────────────────────┐
-│  YOLOv8 (best.pt)    │  → detects players + goalkeepers
+│  YOLOv11 (best.pt)    │  → detects players + goalkeepers
 │  conf=0.5            │    ghost detections filtered by min size
 └──────────────────────┘
     │
@@ -117,7 +117,7 @@ This section is the honest record. Six iterations of tracker + embedding combina
 - `reid_matcher.py` — gallery-based matching with team constraint, EMA updates, the 5 gating layers
 - Min bbox size filter — killed the ghost detections that were seeding fake tracks
 
-**Result: 4 correct re-IDs (player IDs 11, 12, 13, 17), 18 unique consistent IDs.** This is the final submitted version.
+**Result: 4 correct re-IDs (player IDs 11, 12, 14, 17).** This is the final submitted version.
 
 ### 3.5 Attempt 5 — Fine-tune OSNet on SoccerNet (50 epochs, 49K images)
 
