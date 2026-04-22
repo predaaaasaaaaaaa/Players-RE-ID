@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-Built a single-feed player re-identification pipeline from scratch over 5 days. Final result: **4 correct re-IDs** across the clip with 18 unique consistent IDs. The pipeline combines YOLOv8 detection, BoT-SORT tracking, KMeans team classification, and an OSNet-based re-ID matcher with a 5-layer "confident track storage" gating system.
+Built a single-feed player re-identification pipeline from scratch over 5 days. Final result: **4 correct re-IDs** across the clip with 18 unique consistent IDs. The pipeline combines YOLOv11 detection, BoT-SORT tracking, KMeans team classification, and an OSNet-based re-ID matcher with a 5-layer "confident track storage" gating system.
 
 Along the way I tried 5 different tracker/embedding combinations, fine-tuned OSNet on 49K SoccerNet images for 50 epochs, built a custom similarity-distribution diagnostic tool, and eventually learned something important: **on a 15-second broadcast clip of two teams in identical jerseys, the ceiling on appearance-only re-ID is genuinely low, and better embeddings alone cannot break it.** The report explains why, with data.
 

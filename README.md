@@ -79,7 +79,7 @@ That's it. No flags, no args. The input clip is already in the repo.
 ```
 Players-RE-ID/
 ├── config.py              # all paths + thresholds
-├── detector.py            # YOLOv8 wrapper (loads best.pt)
+├── detector.py            # YOLOv11 wrapper (loads best.pt)
 ├── tracker.py             # BoT-SORT with native re-ID
 ├── team_classifier.py     # 2-cluster KMeans on HSV (team assignment)
 ├── feature_extractor.py   # HSV histogram + OSNet embedding
